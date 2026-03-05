@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNA4 IB Quality Dashboard -- Bootloader
 // @namespace    https://github.com/Srinivas524/quality-dashboard
-// @version      1.2.1
+// @version      1.2.2
 // @description  Dual-mode -- full dashboard on SharePoint, floating widget on Atlas
 // @author       Srinivas524
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var BOOT_VERSION = '1.2.1';
+  var BOOT_VERSION = '1.2.2';
   var SP_BASE = 'https://amazon.sharepoint.com/sites/SNA4IB';
   var FILE_BASE = SP_BASE + '/DashboardApp/pages/receive';
   var ROOT_ID = 'receive-root';
@@ -31,7 +31,6 @@
     js:   FILE_BASE + '/receive.js'
   };
 
-  // Floating mode only needs CSS from SharePoint -- JS is embedded below
   var FLOAT_CSS_URL = FILE_BASE + '/float.css';
 
   var hostname = window.location.hostname.toLowerCase();
@@ -43,10 +42,39 @@
 
   console.log('[RECEIVE BOOT] Mode: ' + MODE + ' | v' + BOOT_VERSION);
 
+  // -- Safe globals for receive.js (eval'd in fullpage mode) --
   window.RECEIVE_BOOT_VERSION = BOOT_VERSION;
   window.RECEIVE_MODE = MODE;
-  window.GM_xmlhttpRequest_proxy = GM_xmlhttpRequest;
 
+  // -- Locked-down proxy for receive.js (fullpage mode only) --
+  // Only allows requests to Atlas GraphQL and SharePoint dashboard files
+  window.GM_xmlhttpRequest_proxy = (function () {
+    var ALLOWED_PREFIXES = [
+      'https://atlas.qubit.amazon.dev/graphql',
+      FILE_BASE
+    ];
+
+    return function (opts) {
+      if (!opts || !opts.url) return;
+
+      var allowed = false;
+      for (var i = 0; i < ALLOWED_PREFIXES.length; i++) {
+        if (opts.url.indexOf(ALLOWED_PREFIXES[i]) === 0) { allowed = true; break; }
+      }
+
+      if (!allowed) {
+        console.warn('[RECEIVE BOOT] Blocked unauthorized request to:', opts.url);
+        if (opts.onerror) opts.onerror({ error: 'Blocked by bootloader' });
+        return;
+      }
+
+      opts.anonymous = false;
+      opts.timeout = Math.min(opts.timeout || 20000, 30000);
+      return GM_xmlhttpRequest(opts);
+    };
+  })();
+
+  // -- Internal fetch (unrestricted, only used by bootloader itself) --
   function fetchFile(url) {
     return new Promise(function (resolve, reject) {
       GM_xmlhttpRequest({
@@ -65,7 +93,7 @@
   }
 
   // ============================================================
-  // FULLPAGE MODE (SharePoint) -- unchanged
+  // FULLPAGE MODE (SharePoint)
   // ============================================================
 
   var spBlocker = null;
@@ -178,8 +206,6 @@
 
   // ============================================================
   // FLOATING MODE (Atlas)
-  // CSS: fetched from SharePoint (GM_addStyle bypasses CSP)
-  // JS: embedded here (eval blocked by Atlas CSP)
   // ============================================================
 
   function bootFloating() {
@@ -188,20 +214,20 @@
     fetchFile(FLOAT_CSS_URL).then(function (css) {
       GM_addStyle(css);
       console.log('[RECEIVE BOOT] Float CSS injected');
-      runFloatingWidget();
+      runFloatingWidget(GM_xmlhttpRequest);
     }).catch(function (err) {
       console.warn('[RECEIVE BOOT] Float CSS failed, using embedded fallback:', err.message);
-      runFloatingWidget();
+      runFloatingWidget(GM_xmlhttpRequest);
     });
   }
 
   // ----------------------------------------------------------
-  // EMBEDDED FLOATING WIDGET (bypasses CSP)
+  // EMBEDDED FLOATING WIDGET
+  // GM_xmlhttpRequest passed directly -- never touches window
   // ----------------------------------------------------------
 
-  function runFloatingWidget() {
+  function runFloatingWidget(GM_fetch) {
 
-    var GM_fetch = window.GM_xmlhttpRequest_proxy;
     var GRAPHQL_URL = 'https://atlas.qubit.amazon.dev/graphql';
     var WAREHOUSE_ID = 'SNA4';
     var DEPARTMENT = 'receive';
@@ -238,7 +264,6 @@
       var t = document.createElement('div');
       t.className = 'aqm-toast';
       t.textContent = msg;
-      // Inline fallback style in case CSS didn't load
       t.style.cssText = 'position:fixed;bottom:100px;right:24px;background:#1e293b;color:#fff;padding:10px 20px;border-radius:10px;font-size:13px;z-index:2147483647;box-shadow:0 8px 32px rgba(0,0,0,.3);opacity:0;transform:translateY(10px);transition:all .3s;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;';
       document.body.appendChild(t);
       requestAnimationFrame(function () { t.style.opacity = '1'; t.style.transform = 'translateY(0)'; });
