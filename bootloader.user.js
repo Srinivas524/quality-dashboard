@@ -5,8 +5,8 @@
 // @author       Srinivas524
 // @namespace    https://github.com/Srinivas524/quality-dashboard
 // @homepageURL  https://github.com/Srinivas524/quality-dashboard
-// @updateURL    https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/receive-monitor.user.js
-// @downloadURL  https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/receive-monitor.user.js
+// @updateURL    https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/bootloader.user.js
+// @downloadURL  https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/bootloader.user.js
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
 // @match        https://atlas.qubit.amazon.dev/*
 // @connect      atlas.qubit.amazon.dev
