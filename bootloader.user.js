@@ -9,15 +9,16 @@
 // @downloadURL  https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/bootloader.user.js
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
 // @match        https://atlas.qubit.amazon.dev/*
-// @connect      atlas.qubit.amazon.dev
-// @grant        GM_xmlhttpRequest
 // @run-at       document-idle
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      amazon.sharepoint.com
+// @connect      atlas.qubit.amazon.dev
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  // ── SharePoint document library (same-origin, normal fetch) ──
   var SP_BASE = 'https://amazon.sharepoint.com/sites/SNA4IB/DashboardApp/pages/receive';
 
   var FILES = {
@@ -25,55 +26,62 @@
     js:  SP_BASE + '/receive.js'
   };
 
-  // Cache-bust so edits are picked up immediately
-  function cacheBust(url) {
-    return url + '?v=' + Date.now();
-  }
+  // Expose GM_xmlhttpRequest so receive.js can call Atlas GraphQL
+  window.GM_xmlhttpRequest_proxy = GM_xmlhttpRequest;
 
-  // ── Load a file from SharePoint (same origin = plain fetch) ──
-  function loadFile(url) {
-    return fetch(cacheBust(url), {
-      credentials: 'same-origin',
-      cache: 'no-store'
-    }).then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + url);
-      return res.text();
+  function fetchFile(url) {
+    return new Promise(function (resolve, reject) {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url + '?_nocache=' + Date.now(),
+        headers: { 'Cache-Control': 'no-cache' },
+        timeout: 15000,
+        onload: function (res) {
+          if (res.status >= 200 && res.status < 400) {
+            resolve(res.responseText);
+          } else {
+            reject(new Error('HTTP ' + res.status + ' for ' + url));
+          }
+        },
+        onerror: function () { reject(new Error('Network error: ' + url)); },
+        ontimeout: function () { reject(new Error('Timeout: ' + url)); }
+      });
     });
   }
 
-  // ── Boot sequence ──
   function boot() {
+    console.log('[AQM Boot] Loading receive module...');
+
     Promise.all([
-      loadFile(FILES.css),
-      loadFile(FILES.js)
+      fetchFile(FILES.css),
+      fetchFile(FILES.js)
     ]).then(function (results) {
       var cssText = results[0];
       var jsText  = results[1];
 
       // 1) Inject CSS
-      var style = document.createElement('style');
-      style.textContent = cssText;
-      document.head.appendChild(style);
+      GM_addStyle(cssText);
+      console.log('[AQM Boot] ✅ CSS injected');
 
-      // 2) Execute JS — pass GM_xmlhttpRequest into the sandbox
-      //    receive.js can reference GM_xmlhttpRequest as a normal variable
-      var run = new Function('GM_xmlhttpRequest', jsText);
-      run(GM_xmlhttpRequest);
-
-      console.log('[Bootloader] receive module loaded');
+      // 2) Execute JS
+      try {
+        eval(jsText);
+        console.log('[AQM Boot] ✅ JS executed — receive monitor loaded');
+      } catch (err) {
+        console.error('[AQM Boot] JS execution error:', err);
+      }
 
     }).catch(function (err) {
-      console.error('[Bootloader] Failed to load receive module:', err);
+      console.error('[AQM Boot] Failed to load receive module:', err);
     });
   }
 
-  // ── Wait for DOM then boot ──
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
-      setTimeout(boot, 300);
+      setTimeout(boot, 500);
     }, { once: true });
   } else {
-    setTimeout(boot, 300);
+    setTimeout(boot, 500);
   }
 
 })();
