@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Quality Dashboard — Bootloader
-// @namespace    https://github.com/YOUR_USERNAME/quality-dashboard
+// @namespace    https://github.com/Srinivas524/quality-dashboard
 // @version      1.0.0
 // @description  Bootloader for Quality Dashboard. Loads app from SharePoint.
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/CollabHome.aspx*
@@ -14,8 +14,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-start
-// @updateURL    https://raw.githubusercontent.com/YOUR_USERNAME/quality-dashboard/main/bootloader.user.js
-// @downloadURL  https://raw.githubusercontent.com/YOUR_USERNAME/quality-dashboard/main/bootloader.user.js
+// @updateURL    https://raw.githubusercontent.com/Srinivas524/quality-dashboard/main/bootloader.user.js
+// @downloadURL  https://raw.githubusercontent.com/Srinivas524/quality-dashboard/main/bootloader.user.js
 // ==/UserScript==
 
 (function () {
