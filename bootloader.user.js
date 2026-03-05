@@ -9,7 +9,6 @@
 // @downloadURL  https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/bootloader.user.js
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
 // @match        https://atlas.qubit.amazon.dev/*
-// @connect      amazon.sharepoint.com
 // @connect      atlas.qubit.amazon.dev
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
@@ -18,55 +17,61 @@
 (function () {
   'use strict';
 
-  const BASE = 'https://amazon.sharepoint.com/sites/SNA4IB/DashboardApp/pages/receive';
-  const FILES = {
-    css: BASE + '/receive.css',
-    js:  BASE + '/receive.js'
+  // ── SharePoint document library (same-origin, normal fetch) ──
+  var SP_BASE = 'https://amazon.sharepoint.com/sites/SNA4IB/DashboardApp/pages/receive';
+
+  var FILES = {
+    css: SP_BASE + '/receive.css',
+    js:  SP_BASE + '/receive.js'
   };
 
-  function fetchFile(url) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: url + '?_=' + Date.now(),
-        headers: { 'Accept': '*/*' },
-        onload(res) {
-          if (res.status >= 200 && res.status < 300) {
-            resolve(res.responseText);
-          } else {
-            reject(new Error(`HTTP ${res.status} loading ${url}`));
-          }
-        },
-        onerror: () => reject(new Error('Network error loading ' + url)),
-        ontimeout: () => reject(new Error('Timeout loading ' + url))
-      });
+  // Cache-bust so edits are picked up immediately
+  function cacheBust(url) {
+    return url + '?v=' + Date.now();
+  }
+
+  // ── Load a file from SharePoint (same origin = plain fetch) ──
+  function loadFile(url) {
+    return fetch(cacheBust(url), {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + url);
+      return res.text();
     });
   }
 
-  async function boot() {
-    try {
-      const [css, js] = await Promise.all([
-        fetchFile(FILES.css),
-        fetchFile(FILES.js)
-      ]);
+  // ── Boot sequence ──
+  function boot() {
+    Promise.all([
+      loadFile(FILES.css),
+      loadFile(FILES.js)
+    ]).then(function (results) {
+      var cssText = results[0];
+      var jsText  = results[1];
 
-      // Inject CSS
-      const style = document.createElement('style');
-      style.textContent = css;
+      // 1) Inject CSS
+      var style = document.createElement('style');
+      style.textContent = cssText;
       document.head.appendChild(style);
 
-      // Execute JS — pass GM_xmlhttpRequest into the sandbox
-      const run = new Function('GM_xmlhttpRequest', js);
+      // 2) Execute JS — pass GM_xmlhttpRequest into the sandbox
+      //    receive.js can reference GM_xmlhttpRequest as a normal variable
+      var run = new Function('GM_xmlhttpRequest', jsText);
       run(GM_xmlhttpRequest);
 
-      console.log('📡 Bootloader: receive module loaded');
-    } catch (err) {
-      console.error('📡 Bootloader: failed to load receive module', err);
-    }
+      console.log('[Bootloader] receive module loaded');
+
+    }).catch(function (err) {
+      console.error('[Bootloader] Failed to load receive module:', err);
+    });
   }
 
+  // ── Wait for DOM then boot ──
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => setTimeout(boot, 300), { once: true });
+    document.addEventListener('DOMContentLoaded', function () {
+      setTimeout(boot, 300);
+    }, { once: true });
   } else {
     setTimeout(boot, 300);
   }
