@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Atlas Receive Quality Monitor
-// @version      2.1.0
+// @version      2.2.0
 // @description  Auto-monitors Receive Error Indicator & Decant Error Indicator for SNA4
 // @author       Srinivas524
 // @namespace    https://github.com/Srinivas524/quality-dashboard
@@ -8,6 +8,7 @@
 // @updateURL    https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/receive-monitor.user.js
 // @downloadURL  https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/receive-monitor.user.js
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
+// @match        https://atlas.qubit.amazon.dev/*
 // @connect      atlas.qubit.amazon.dev
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
@@ -22,6 +23,11 @@
   const THRESHOLD = 3300;
   const TRACKED_DEFECTS = ["Receive Error Indicator", "Decant Error Indicator"];
   const AUTO_REFRESH_MIN = 5;
+
+  let panelOpen = false;
+  let badgeStatus = 'loading'; // 'loading' | 'clear' | 'flagged' | 'error'
+  let autoRefreshTimer = null;
+  let initialized = false;
 
   // ═══════════════════════════════════════════════════════════════
   // SHIFT TIME CALCULATION
@@ -195,8 +201,7 @@
     });
 
     employees.sort((a, b) => {
-      let totalA = 0;
-      let totalB = 0;
+      let totalA = 0, totalB = 0;
       if (flaggedNames.includes('Receive Error Indicator')) { totalA += a.receiveErrors; totalB += b.receiveErrors; }
       if (flaggedNames.includes('Decant Error Indicator')) { totalA += a.decantErrors; totalB += b.decantErrors; }
       return totalB - totalA;
@@ -206,18 +211,21 @@
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // RENDER
+  // RENDER INSIDE PANEL
   // ═══════════════════════════════════════════════════════════════
 
   function renderResults(result) {
-    const content = document.getElementById('content');
+    const content = document.getElementById('aqm-content');
+    if (!content) return;
 
     if (result.status === 'error') {
+      badgeStatus = 'error';
+      updateBadge();
       content.innerHTML = `
-        <div class="status-card error">
-          <div class="status-icon">❌</div>
-          <div class="status-title">Error</div>
-          <div class="status-msg">${result.message}</div>
+        <div class="aqm-status-card aqm-error">
+          <div class="aqm-status-icon">❌</div>
+          <div class="aqm-status-title">Error</div>
+          <div class="aqm-status-msg">${result.message}</div>
         </div>`;
       return;
     }
@@ -225,58 +233,63 @@
     const recvInd = result.indicators['Receive Error Indicator'];
     const decInd = result.indicators['Decant Error Indicator'];
 
-    let html = `<div class="indicator-boxes">
-      <div class="indicator-box ${recvInd?.over ? 'over' : 'under'}">
-        <div class="indicator-label">Receive Error Indicator</div>
-        <div class="indicator-status">${recvInd?.over ? '🚨 OVER THRESHOLD' : '✅ UNDER THRESHOLD'}</div>
-        <div class="indicator-threshold">Threshold: ${THRESHOLD.toLocaleString()}</div>
+    let html = `<div class="aqm-indicator-boxes">
+      <div class="aqm-indicator-box ${recvInd?.over ? 'aqm-over' : 'aqm-under'}">
+        <div class="aqm-indicator-label">Receive Error Indicator</div>
+        <div class="aqm-indicator-status">${recvInd?.over ? '🚨 OVER' : '✅ UNDER'}</div>
+        <div class="aqm-indicator-threshold">Threshold: ${THRESHOLD.toLocaleString()}</div>
       </div>
-      <div class="indicator-box ${decInd?.over ? 'over' : 'under'}">
-        <div class="indicator-label">Decant Error Indicator</div>
-        <div class="indicator-status">${decInd?.over ? '🚨 OVER THRESHOLD' : '✅ UNDER THRESHOLD'}</div>
-        <div class="indicator-threshold">Threshold: ${THRESHOLD.toLocaleString()}</div>
+      <div class="aqm-indicator-box ${decInd?.over ? 'aqm-over' : 'aqm-under'}">
+        <div class="aqm-indicator-label">Decant Error Indicator</div>
+        <div class="aqm-indicator-status">${decInd?.over ? '🚨 OVER' : '✅ UNDER'}</div>
+        <div class="aqm-indicator-threshold">Threshold: ${THRESHOLD.toLocaleString()}</div>
       </div>
     </div>`;
 
     if (result.status === 'clear') {
+      badgeStatus = 'clear';
+      updateBadge();
       html += `
-        <div class="status-card clear">
-          <div class="status-icon">✅</div>
-          <div class="status-title">All Clear</div>
-          <div class="status-msg">Both indicators are under threshold — no action needed</div>
+        <div class="aqm-status-card aqm-clear">
+          <div class="aqm-status-icon">✅</div>
+          <div class="aqm-status-title">All Clear</div>
+          <div class="aqm-status-msg">Both indicators under threshold</div>
         </div>`;
       content.innerHTML = html;
       return;
     }
+
+    badgeStatus = 'flagged';
+    updateBadge();
 
     if (result.employees.length === 0) {
       html += `
-        <div class="status-card warn">
-          <div class="status-icon">⚠️</div>
-          <div class="status-title">Threshold Exceeded</div>
-          <div class="status-msg">No individual employees found with non-zero defect counts</div>
+        <div class="aqm-status-card aqm-warn">
+          <div class="aqm-status-icon">⚠️</div>
+          <div class="aqm-status-title">Threshold Exceeded</div>
+          <div class="aqm-status-msg">No individual employees found with non-zero defect counts</div>
         </div>`;
       content.innerHTML = html;
       return;
     }
 
-    html += `<div class="emp-header">👥 ${result.employees.length} employee${result.employees.length > 1 ? 's' : ''} with defects</div>`;
-    html += `<div class="table-wrap"><table>
+    html += `<div class="aqm-emp-header">👥 ${result.employees.length} employee${result.employees.length > 1 ? 's' : ''} with defects</div>`;
+    html += `<div class="aqm-table-wrap"><table class="aqm-table">
       <thead><tr>
         <th>#</th>
         <th>Login</th>
         <th>Manager</th>
-        <th>Receive Errors</th>
-        <th>Decant Errors</th>
+        <th>Recv Err</th>
+        <th>Dcnt Err</th>
       </tr></thead><tbody>`;
 
     result.employees.forEach((e, i) => {
       html += `<tr>
-        <td class="num">${i + 1}</td>
+        <td class="aqm-num">${i + 1}</td>
         <td><strong>${e.login}</strong></td>
         <td>${e.manager}</td>
-        <td class="num ${e.receiveErrors > 0 ? 'val-bad' : ''}">${e.receiveErrors}</td>
-        <td class="num ${e.decantErrors > 0 ? 'val-bad' : ''}">${e.decantErrors}</td>
+        <td class="aqm-num ${e.receiveErrors > 0 ? 'aqm-val-bad' : ''}">${e.receiveErrors}</td>
+        <td class="aqm-num ${e.decantErrors > 0 ? 'aqm-val-bad' : ''}">${e.decantErrors}</td>
       </tr>`;
     });
 
@@ -285,74 +298,68 @@
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // PAGE BUILD
+  // BADGE UPDATE (on floating icon)
   // ═══════════════════════════════════════════════════════════════
 
-  function nukePage() {
-    document.title = `Atlas — ${WAREHOUSE_ID} Receive Monitor`;
-    document.documentElement.innerHTML = `
-    <head>
-      <meta charset="utf-8">
-      <title>Atlas — ${WAREHOUSE_ID} Receive Monitor</title>
-      <style>${CSS}</style>
-    </head>
-    <body>
-      <div id="app">
-        <header>
-          <div class="header-left">
-            <h1>📡 Receive Quality Monitor</h1>
-            <span class="warehouse-badge">${WAREHOUSE_ID}</span>
-          </div>
-          <div class="header-right">
-            <button id="btn-refresh" class="btn-refresh" title="Refresh now">🔄</button>
-            <span id="clock"></span>
-          </div>
-        </header>
-        <div class="shift-bar" id="shift-bar"></div>
-        <div id="content">
-          <div class="loading">
-            <div class="spinner"></div>
-            <div>Establishing session...</div>
-          </div>
-        </div>
-        <div class="footer" id="footer"></div>
-      </div>
-    </body>`;
+  function updateBadge() {
+    const dot = document.getElementById('aqm-badge-dot');
+    if (!dot) return;
+    dot.className = 'aqm-badge-dot';
+    if (badgeStatus === 'clear') {
+      dot.classList.add('aqm-dot-green');
+      dot.title = 'All clear';
+    } else if (badgeStatus === 'flagged') {
+      dot.classList.add('aqm-dot-red');
+      dot.title = 'Threshold exceeded!';
+    } else if (badgeStatus === 'error') {
+      dot.classList.add('aqm-dot-yellow');
+      dot.title = 'Error';
+    } else {
+      dot.classList.add('aqm-dot-blue');
+      dot.title = 'Loading...';
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // UTILITIES
+  // SHIFT BAR & FOOTER
   // ═══════════════════════════════════════════════════════════════
 
   function renderShiftBar(tr) {
-    const el = document.getElementById('shift-bar');
+    const el = document.getElementById('aqm-shift-bar');
+    if (!el) return;
     const icon = tr.shift === 'day' ? '☀️' : '🌙';
     el.innerHTML = `${icon} <strong>${tr.shift.toUpperCase()} SHIFT</strong> &nbsp;—&nbsp; ${tr.startLocal} → ${tr.endLocal}`;
   }
 
   function renderFooter(elapsed) {
-    const el = document.getElementById('footer');
-    el.textContent = `Last updated: ${new Date().toLocaleTimeString()} — ${elapsed}ms — Auto-refreshes every ${AUTO_REFRESH_MIN} min`;
+    const el = document.getElementById('aqm-footer');
+    if (!el) return;
+    el.textContent = `Updated: ${new Date().toLocaleTimeString()} — ${elapsed}ms — Auto-refreshes every ${AUTO_REFRESH_MIN} min`;
   }
 
   function startClock() {
-    const el = document.getElementById('clock');
+    const el = document.getElementById('aqm-clock');
     if (!el) return;
     const tick = () => { el.textContent = new Date().toLocaleTimeString(); };
     tick();
     setInterval(tick, 1000);
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // TOAST
+  // ═══════════════════════════════════════════════════════════════
+
   function showToast(msg) {
     const t = document.createElement('div');
     t.textContent = msg;
     Object.assign(t.style, {
-      position: 'fixed', bottom: '24px', right: '24px',
+      position: 'fixed', bottom: '100px', right: '24px',
       background: '#1e293b', color: '#fff',
-      padding: '12px 24px', borderRadius: '10px',
-      fontSize: '14px', zIndex: '99999',
+      padding: '10px 20px', borderRadius: '10px',
+      fontSize: '13px', zIndex: '2147483647',
       boxShadow: '0 8px 32px rgba(0,0,0,.3)',
-      transition: 'all .3s', opacity: '0', transform: 'translateY(10px)'
+      transition: 'all .3s', opacity: '0', transform: 'translateY(10px)',
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
     });
     document.body.appendChild(t);
     requestAnimationFrame(() => { t.style.opacity = '1'; t.style.transform = 'translateY(0)'; });
@@ -363,26 +370,118 @@
   }
 
   // ═══════════════════════════════════════════════════════════════
+  // TOGGLE PANEL
+  // ═══════════════════════════════════════════════════════════════
+
+  function togglePanel() {
+    const panel = document.getElementById('aqm-panel');
+    const fab = document.getElementById('aqm-fab');
+    if (!panel) return;
+
+    panelOpen = !panelOpen;
+
+    if (panelOpen) {
+      panel.style.display = 'flex';
+      requestAnimationFrame(() => {
+        panel.style.opacity = '1';
+        panel.style.transform = 'scale(1) translateY(0)';
+      });
+      fab.style.transform = 'scale(0.9)';
+    } else {
+      panel.style.opacity = '0';
+      panel.style.transform = 'scale(0.95) translateY(20px)';
+      setTimeout(() => { panel.style.display = 'none'; }, 200);
+      fab.style.transform = 'scale(1)';
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // BUILD FLOATING UI
+  // ═══════════════════════════════════════════════════════════════
+
+  function buildFloatingUI() {
+    // Inject scoped styles
+    const style = document.createElement('style');
+    style.textContent = CSS;
+    document.head.appendChild(style);
+
+    // === Floating Action Button ===
+    const fab = document.createElement('div');
+    fab.id = 'aqm-fab';
+    fab.title = 'Atlas Receive Monitor';
+    fab.innerHTML = `
+      <span class="aqm-fab-icon">📡</span>
+      <span class="aqm-badge-dot aqm-dot-blue" id="aqm-badge-dot"></span>
+    `;
+    fab.addEventListener('click', togglePanel);
+    document.body.appendChild(fab);
+
+    // === Floating Panel ===
+    const panel = document.createElement('div');
+    panel.id = 'aqm-panel';
+    panel.innerHTML = `
+      <div class="aqm-panel-header">
+        <div class="aqm-panel-header-left">
+          <span class="aqm-panel-title">📡 Receive Monitor</span>
+          <span class="aqm-warehouse-badge">${WAREHOUSE_ID}</span>
+        </div>
+        <div class="aqm-panel-header-right">
+          <button id="aqm-btn-refresh" class="aqm-btn-refresh" title="Refresh now">🔄</button>
+          <span id="aqm-clock" class="aqm-clock"></span>
+          <button id="aqm-btn-close" class="aqm-btn-close" title="Close panel">✕</button>
+        </div>
+      </div>
+      <div class="aqm-shift-bar" id="aqm-shift-bar"></div>
+      <div class="aqm-panel-body" id="aqm-content">
+        <div class="aqm-loading">
+          <div class="aqm-spinner"></div>
+          <div>Establishing session...</div>
+        </div>
+      </div>
+      <div class="aqm-footer" id="aqm-footer"></div>
+    `;
+    document.body.appendChild(panel);
+
+    // Wire up buttons
+    document.getElementById('aqm-btn-close').addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePanel();
+    });
+    document.getElementById('aqm-btn-refresh').addEventListener('click', (e) => {
+      e.stopPropagation();
+      runFetch(false);
+    });
+
+    // Prevent clicks inside panel from closing it
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    startClock();
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   // MAIN RUN CYCLE
   // ═══════════════════════════════════════════════════════════════
 
   async function runFetch(isAutoRefresh) {
-    const content = document.getElementById('content');
+    const content = document.getElementById('aqm-content');
+    if (!content) return;
     const tr = getShiftTimeRange();
     renderShiftBar(tr);
 
     if (!isAutoRefresh) {
+      badgeStatus = 'loading';
+      updateBadge();
       content.innerHTML = `
-        <div class="loading">
-          <div class="spinner"></div>
+        <div class="aqm-loading">
+          <div class="aqm-spinner"></div>
           <div>Establishing session...</div>
         </div>`;
       await silentPreAuth();
     }
 
     content.innerHTML = `
-      <div class="loading">
-        <div class="spinner"></div>
+      <div class="aqm-loading">
+        <div class="aqm-spinner"></div>
         <div>Fetching Receive data...</div>
       </div>`;
 
@@ -411,136 +510,366 @@
         }
       }
 
+      badgeStatus = 'error';
+      updateBadge();
       content.innerHTML = `
-        <div class="status-card error">
-          <div class="status-icon">❌</div>
-          <div class="status-title">Fetch Failed</div>
-          <div class="status-msg">Session may have expired. Try refreshing the page.</div>
-          <pre class="error-detail">${JSON.stringify(err, null, 2)}</pre>
+        <div class="aqm-status-card aqm-error">
+          <div class="aqm-status-icon">❌</div>
+          <div class="aqm-status-title">Fetch Failed</div>
+          <div class="aqm-status-msg">Session may have expired. Try refreshing.</div>
+          <pre class="aqm-error-detail">${JSON.stringify(err, null, 2)}</pre>
         </div>`;
     }
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // CSS
+  // CSS — all prefixed with aqm- to avoid conflicts
   // ═══════════════════════════════════════════════════════════════
 
   const CSS = `
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
+    /* ===== Floating Action Button ===== */
+    #aqm-fab {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      width: 60px;
+      height: 60px;
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border: 2px solid #334155;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 2147483646;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 0 0 rgba(37,99,235,0.4);
+      transition: all 0.3s cubic-bezier(.4,0,.2,1);
+      user-select: none;
+    }
+    #aqm-fab:hover {
+      transform: scale(1.1) !important;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 0 0 4px rgba(37,99,235,0.25);
+      border-color: #2563eb;
+    }
+    .aqm-fab-icon {
+      font-size: 26px;
+      line-height: 1;
+    }
+
+    /* Badge dot */
+    .aqm-badge-dot {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid #0f172a;
+      transition: background 0.3s;
+    }
+    .aqm-dot-green { background: #22c55e; }
+    .aqm-dot-red { background: #ef4444; animation: aqm-pulse 1.5s infinite; }
+    .aqm-dot-yellow { background: #f59e0b; }
+    .aqm-dot-blue { background: #3b82f6; animation: aqm-pulse 1.5s infinite; }
+
+    @keyframes aqm-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+      50% { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+    }
+
+    /* ===== Floating Panel ===== */
+    #aqm-panel {
+      position: fixed;
+      bottom: 96px;
+      right: 24px;
+      width: 520px;
+      max-height: calc(100vh - 120px);
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 16px;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
+      z-index: 2147483647;
+      display: none;
+      flex-direction: column;
+      opacity: 0;
+      transform: scale(0.95) translateY(20px);
+      transition: opacity 0.2s ease, transform 0.2s ease;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0f172a; color: #e2e8f0; min-height: 100vh;
+      color: #e2e8f0;
+      font-size: 13px;
+      line-height: 1.5;
+      overflow: hidden;
     }
-    #app { max-width: 1000px; margin: 0 auto; padding: 16px 24px; }
 
-    header {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 16px 0; border-bottom: 1px solid #1e293b; margin-bottom: 16px;
+    /* Panel Header */
+    .aqm-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 16px;
+      border-bottom: 1px solid #1e293b;
+      background: #0f172a;
+      flex-shrink: 0;
     }
-    .header-left { display: flex; align-items: center; gap: 12px; }
-    h1 { font-size: 22px; font-weight: 800; color: #f8fafc; }
-    .warehouse-badge {
-      background: #2563eb; color: white; padding: 4px 12px;
-      border-radius: 6px; font-size: 13px; font-weight: 700;
+    .aqm-panel-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
-    .header-right { display: flex; align-items: center; gap: 12px; font-size: 14px; color: #94a3b8; font-variant-numeric: tabular-nums; }
-
-    .btn-refresh {
-      background: #1e293b; border: 1px solid #334155; color: #94a3b8;
-      padding: 6px 12px; border-radius: 8px; font-size: 16px;
-      cursor: pointer; transition: all 0.2s;
+    .aqm-panel-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: #f8fafc;
     }
-    .btn-refresh:hover { background: #334155; color: #e2e8f0; transform: rotate(90deg); }
-
-    .shift-bar {
-      background: #1e293b; border-radius: 10px; padding: 12px 16px;
-      font-size: 13px; color: #94a3b8; margin-bottom: 16px;
+    .aqm-warehouse-badge {
+      background: #2563eb;
+      color: white;
+      padding: 2px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .aqm-panel-header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .aqm-clock {
+      font-size: 12px;
+      color: #64748b;
+      font-variant-numeric: tabular-nums;
+    }
+    .aqm-btn-refresh {
+      background: #1e293b;
       border: 1px solid #334155;
+      color: #94a3b8;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+      line-height: 1;
+    }
+    .aqm-btn-refresh:hover {
+      background: #334155;
+      color: #e2e8f0;
+      transform: rotate(90deg);
+    }
+    .aqm-btn-close {
+      background: none;
+      border: 1px solid transparent;
+      color: #64748b;
+      font-size: 16px;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      transition: all 0.2s;
+      line-height: 1;
+    }
+    .aqm-btn-close:hover {
+      background: rgba(239,68,68,0.1);
+      color: #f87171;
+      border-color: rgba(239,68,68,0.3);
     }
 
-    .indicator-boxes { display: flex; gap: 16px; margin-bottom: 20px; }
-    .indicator-box {
-      flex: 1; border-radius: 12px; padding: 20px 24px;
-      display: flex; flex-direction: column; gap: 6px;
-    }
-    .indicator-box.over {
-      background: rgba(220,38,38,0.08); border: 2px solid rgba(220,38,38,0.4);
-    }
-    .indicator-box.under {
-      background: rgba(34,197,94,0.06); border: 2px solid rgba(34,197,94,0.3);
-    }
-    .indicator-label {
-      font-size: 14px; font-weight: 700; color: #e2e8f0;
-    }
-    .indicator-status {
-      font-size: 18px; font-weight: 800;
-    }
-    .indicator-box.over .indicator-status { color: #f87171; }
-    .indicator-box.under .indicator-status { color: #4ade80; }
-    .indicator-threshold {
-      font-size: 12px; color: #64748b;
+    /* Shift bar */
+    .aqm-shift-bar {
+      background: #1e293b;
+      padding: 8px 16px;
+      font-size: 11px;
+      color: #94a3b8;
+      border-bottom: 1px solid #334155;
+      flex-shrink: 0;
     }
 
-    .status-card {
-      text-align: center; padding: 60px 20px; border-radius: 12px;
-      border: 1px solid #1e293b; margin: 20px 0;
-    }
-    .status-card.clear { background: rgba(34,197,94,0.05); border-color: rgba(34,197,94,0.2); }
-    .status-card.error { background: rgba(220,38,38,0.05); border-color: rgba(220,38,38,0.2); }
-    .status-card.warn { background: rgba(251,191,36,0.05); border-color: rgba(251,191,36,0.2); }
-    .status-icon { font-size: 48px; margin-bottom: 12px; }
-    .status-title { font-size: 22px; font-weight: 800; margin-bottom: 8px; }
-    .status-card.clear .status-title { color: #4ade80; }
-    .status-card.error .status-title { color: #f87171; }
-    .status-card.warn .status-title { color: #fbbf24; }
-    .status-msg { font-size: 14px; color: #94a3b8; }
-    .error-detail {
-      text-align: left; background: #0f172a; padding: 16px; margin-top: 16px;
-      border-radius: 8px; font-size: 12px; color: #f87171;
-      max-height: 150px; overflow: auto; font-family: 'SF Mono', monospace;
+    /* Scrollable body */
+    .aqm-panel-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 16px;
+      min-height: 120px;
     }
 
-    .emp-header {
-      font-size: 14px; font-weight: 700; color: #e2e8f0;
-      margin-bottom: 12px; padding: 8px 0;
+    /* Indicator boxes */
+    .aqm-indicator-boxes {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .aqm-indicator-box {
+      flex: 1;
+      border-radius: 10px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .aqm-indicator-box.aqm-over {
+      background: rgba(220,38,38,0.08);
+      border: 2px solid rgba(220,38,38,0.4);
+    }
+    .aqm-indicator-box.aqm-under {
+      background: rgba(34,197,94,0.06);
+      border: 2px solid rgba(34,197,94,0.3);
+    }
+    .aqm-indicator-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .aqm-indicator-status {
+      font-size: 15px;
+      font-weight: 800;
+    }
+    .aqm-indicator-box.aqm-over .aqm-indicator-status { color: #f87171; }
+    .aqm-indicator-box.aqm-under .aqm-indicator-status { color: #4ade80; }
+    .aqm-indicator-threshold {
+      font-size: 11px;
+      color: #64748b;
+    }
+
+    /* Status cards */
+    .aqm-status-card {
+      text-align: center;
+      padding: 40px 16px;
+      border-radius: 10px;
+      border: 1px solid #1e293b;
+      margin: 10px 0;
+    }
+    .aqm-status-card.aqm-clear { background: rgba(34,197,94,0.05); border-color: rgba(34,197,94,0.2); }
+    .aqm-status-card.aqm-error { background: rgba(220,38,38,0.05); border-color: rgba(220,38,38,0.2); }
+    .aqm-status-card.aqm-warn { background: rgba(251,191,36,0.05); border-color: rgba(251,191,36,0.2); }
+    .aqm-status-icon { font-size: 36px; margin-bottom: 8px; }
+    .aqm-status-title { font-size: 18px; font-weight: 800; margin-bottom: 6px; }
+    .aqm-status-card.aqm-clear .aqm-status-title { color: #4ade80; }
+    .aqm-status-card.aqm-error .aqm-status-title { color: #f87171; }
+    .aqm-status-card.aqm-warn .aqm-status-title { color: #fbbf24; }
+    .aqm-status-msg { font-size: 12px; color: #94a3b8; }
+    .aqm-error-detail {
+      text-align: left;
+      background: #0f172a;
+      padding: 12px;
+      margin-top: 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      color: #f87171;
+      max-height: 100px;
+      overflow: auto;
+      font-family: 'SF Mono', Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Employee list */
+    .aqm-emp-header {
+      font-size: 13px;
+      font-weight: 700;
+      color: #e2e8f0;
+      margin-bottom: 10px;
+      padding: 6px 0;
       border-bottom: 1px solid #1e293b;
     }
+    .aqm-table-wrap {
+      overflow: auto;
+      max-height: 40vh;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+    }
+    .aqm-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .aqm-table thead {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .aqm-table th {
+      background: #1e293b;
+      color: #94a3b8;
+      padding: 8px 10px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 2px solid #334155;
+      white-space: nowrap;
+    }
+    .aqm-table td {
+      padding: 8px 10px;
+      border-bottom: 1px solid #1e293b;
+      color: #cbd5e1;
+      white-space: nowrap;
+    }
+    .aqm-table tr:hover td { background: rgba(37,99,235,0.05); }
+    .aqm-num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-family: 'SF Mono', Consolas, monospace;
+    }
+    .aqm-val-bad { color: #f87171; font-weight: 700; }
 
-    .table-wrap {
-      overflow: auto; max-height: 60vh;
-      border: 1px solid #1e293b; border-radius: 10px;
-    }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    thead { position: sticky; top: 0; z-index: 10; }
-    th {
-      background: #1e293b; color: #94a3b8; padding: 10px 14px;
-      text-align: left; font-size: 11px; font-weight: 700;
-      text-transform: uppercase; letter-spacing: 0.5px;
-      border-bottom: 2px solid #334155; white-space: nowrap;
-    }
-    td {
-      padding: 10px 14px; border-bottom: 1px solid #1e293b;
-      color: #cbd5e1; white-space: nowrap;
-    }
-    tr:hover td { background: rgba(37,99,235,0.05); }
-    .num { text-align: right; font-variant-numeric: tabular-nums; font-family: 'SF Mono', monospace; }
-    .val-bad { color: #f87171; font-weight: 700; }
-
-    .footer {
-      margin-top: 16px; padding: 12px 0; font-size: 12px;
-      color: #475569; border-top: 1px solid #1e293b; text-align: center;
+    /* Footer */
+    .aqm-footer {
+      padding: 10px 16px;
+      font-size: 11px;
+      color: #475569;
+      border-top: 1px solid #1e293b;
+      text-align: center;
+      flex-shrink: 0;
+      background: #0f172a;
     }
 
-    .loading {
-      text-align: center; padding: 80px 20px; color: #94a3b8;
-      display: flex; flex-direction: column; align-items: center; gap: 16px;
+    /* Loading */
+    .aqm-loading {
+      text-align: center;
+      padding: 50px 16px;
+      color: #94a3b8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
     }
-    .spinner {
-      width: 40px; height: 40px;
-      border: 3px solid #334155; border-top-color: #2563eb;
-      border-radius: 50%; animation: spin 0.8s linear infinite;
+    .aqm-spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #334155;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: aqm-spin 0.8s linear infinite;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes aqm-spin { to { transform: rotate(360deg); } }
+
+    /* Scrollbar styling inside panel */
+    .aqm-panel-body::-webkit-scrollbar,
+    .aqm-table-wrap::-webkit-scrollbar {
+      width: 6px;
+    }
+    .aqm-panel-body::-webkit-scrollbar-track,
+    .aqm-table-wrap::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .aqm-panel-body::-webkit-scrollbar-thumb,
+    .aqm-table-wrap::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+
+    /* Responsive: narrower screens */
+    @media (max-width: 600px) {
+      #aqm-panel {
+        width: calc(100vw - 16px);
+        right: 8px;
+        bottom: 88px;
+        max-height: calc(100vh - 100px);
+      }
+      .aqm-indicator-boxes {
+        flex-direction: column;
+      }
+    }
   `;
 
   // ═══════════════════════════════════════════════════════════════
@@ -548,18 +877,20 @@
   // ═══════════════════════════════════════════════════════════════
 
   async function init() {
-    nukePage();
-    startClock();
-    document.getElementById('btn-refresh').onclick = () => runFetch(false);
+    if (initialized) return;
+    initialized = true;
+
+    buildFloatingUI();
     await runFetch(false);
-    setInterval(() => runFetch(true), AUTO_REFRESH_MIN * 60 * 1000);
-    console.log('📡 Receive Quality Monitor loaded');
+
+    autoRefreshTimer = setInterval(() => runFetch(true), AUTO_REFRESH_MIN * 60 * 1000);
+    console.log('📡 Receive Quality Monitor (floating) loaded');
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => setTimeout(init, 300), { once: true });
+    document.addEventListener('DOMContentLoaded', () => setTimeout(init, 500), { once: true });
   } else {
-    setTimeout(init, 300);
+    setTimeout(init, 500);
   }
 
 })();
