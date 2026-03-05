@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNA4 IB Quality Dashboard -- Bootloader
 // @namespace    https://github.com/Srinivas524/quality-dashboard
-// @version      1.2.0
+// @version      1.2.1
 // @description  Dual-mode -- full dashboard on SharePoint, floating widget on Atlas
 // @author       Srinivas524
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var BOOT_VERSION = '1.2.0';
+  var BOOT_VERSION = '1.2.1';
   var SP_BASE = 'https://amazon.sharepoint.com/sites/SNA4IB';
   var FILE_BASE = SP_BASE + '/DashboardApp/pages/receive';
   var ROOT_ID = 'receive-root';
@@ -229,6 +229,11 @@
       return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
 
+    function cleanLogin(raw) {
+      if (!raw) return '-';
+      return raw.indexOf('-') > -1 ? raw.split('-').slice(1).join('-') : raw;
+    }
+
     function showToast(msg) {
       var t = document.createElement('div');
       t.className = 'aqm-toast';
@@ -325,7 +330,11 @@
         var has = false;
         if (flagged.indexOf('Receive Error Indicator') > -1 && rv > 0) has = true;
         if (flagged.indexOf('Decant Error Indicator') > -1 && dv > 0) has = true;
-        if (has) employees.push({ login: emp.aggregationField || '-', manager: emp.managerId || '-', receiveErrors: rv, decantErrors: dv, total: rv + dv });
+        if (has) {
+          var rawLogin = emp.aggregationField || '-';
+          var login = cleanLogin(rawLogin);
+          employees.push({ login: login, manager: emp.managerId || '-', receiveErrors: rv, decantErrors: dv, total: rv + dv });
+        }
       }
       employees.sort(function (a, b) { return b.total - a.total; });
       return { status: 'flagged', indicators: indicators, employees: employees };
