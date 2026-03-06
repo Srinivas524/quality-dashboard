@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNA4 IB Quality Dashboard -- Bootloader
 // @namespace    https://github.com/Srinivas524/quality-dashboard
-// @version      1.2.2
+// @version      1.3.0
 // @description  Dual-mode -- full dashboard on SharePoint, floating widget on Atlas
 // @author       Srinivas524
 // @match        https://amazon.sharepoint.com/sites/SNA4IB/SitePages/Receive.aspx
@@ -13,6 +13,7 @@
 // @connect      atlas.qubit.amazon.dev
 // @connect      raw.githubusercontent.com
 // @connect      hooks.slack.com
+// @connect      fclm-portal.amazon.com
 // @updateURL    https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/bootloader.user.js
 // @downloadURL  https://github.com/Srinivas524/quality-dashboard/raw/refs/heads/main/bootloader.user.js
 // ==/UserScript==
@@ -20,7 +21,7 @@
 (function () {
   'use strict';
 
-  var BOOT_VERSION = '1.2.2';
+  var BOOT_VERSION = '1.3.0';
   var SP_BASE = 'https://amazon.sharepoint.com/sites/SNA4IB';
   var FILE_BASE = SP_BASE + '/DashboardApp/pages/receive';
   var ROOT_ID = 'receive-root';
@@ -42,15 +43,13 @@
 
   console.log('[RECEIVE BOOT] Mode: ' + MODE + ' | v' + BOOT_VERSION);
 
-  // -- Safe globals for receive.js (eval'd in fullpage mode) --
   window.RECEIVE_BOOT_VERSION = BOOT_VERSION;
   window.RECEIVE_MODE = MODE;
 
-  // -- Locked-down proxy for receive.js (fullpage mode only) --
-  // Only allows requests to Atlas GraphQL and SharePoint dashboard files
   window.GM_xmlhttpRequest_proxy = (function () {
     var ALLOWED_PREFIXES = [
       'https://atlas.qubit.amazon.dev/graphql',
+      'https://fclm-portal.amazon.com/employee/timeDetails',
       FILE_BASE
     ];
 
@@ -74,7 +73,6 @@
     };
   })();
 
-  // -- Internal fetch (unrestricted, only used by bootloader itself) --
   function fetchFile(url) {
     return new Promise(function (resolve, reject) {
       GM_xmlhttpRequest({
@@ -223,7 +221,6 @@
 
   // ----------------------------------------------------------
   // EMBEDDED FLOATING WIDGET
-  // GM_xmlhttpRequest passed directly -- never touches window
   // ----------------------------------------------------------
 
   function runFloatingWidget(GM_fetch) {
@@ -234,11 +231,14 @@
     var THRESHOLD = 3300;
     var TRACKED_DEFECTS = ['Receive Error Indicator', 'Decant Error Indicator'];
     var AUTO_REFRESH_MIN = 5;
+    var CLOCK_BATCH_SIZE = 3;
+    var CLOCK_BATCH_DELAY = 800;
 
     var ICO = {
       sat: '\uD83D\uDCE1', check: '\u2705', siren: '\uD83D\uDEA8',
       warn: '\u26A0\uFE0F', cross: '\u274C', refresh: '\uD83D\uDD04',
-      people: '\uD83D\uDC65', sun: '\u2600\uFE0F', moon: '\uD83C\uDF19'
+      people: '\uD83D\uDC65', sun: '\u2600\uFE0F', moon: '\uD83C\uDF19',
+      clock: '\uD83D\uDD52'
     };
 
     var panelOpen = false;
@@ -254,6 +254,8 @@
       if (n == null) return '0';
       return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
+
+    function pad2(n) { var s = String(n); return s.length < 2 ? '0' + s : s; }
 
     function cleanLogin(raw) {
       if (!raw) return '-';
@@ -301,6 +303,123 @@
         document.body.appendChild(iframe);
       });
     }
+
+    // -- Clock status filter --
+
+    function extractLastEvent(html) {
+      var rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      var match;
+      var events = [];
+      while ((match = rowPattern.exec(html)) !== null) {
+        var row = match[1];
+        var typeMatch = row.match(/>(onclock\/paid|offclock\/unpaid)/i);
+        if (!typeMatch) continue;
+        var tdPattern = /<td[^>]*>(.*?)<\/td>/gi;
+        var tds = [];
+        var tdMatch;
+        while ((tdMatch = tdPattern.exec(row)) !== null) {
+          tds.push(tdMatch[1].trim());
+        }
+        if (tds.length < 2) continue;
+        events.push({ type: typeMatch[1].toLowerCase(), ts: tds[0] + ' ' + tds[1] });
+      }
+      if (events.length === 0) return { status: 'Unknown', ts: 'No records' };
+      var last = events[events.length - 1];
+      return {
+        status: last.type.indexOf('onclock') > -1 ? 'Clocked In' : 'Clocked Out',
+        ts: last.ts
+      };
+    }
+
+    function parseClockTimestamp(tsStr) {
+      if (!tsStr || tsStr === 'No records' || tsStr === 'Error' || tsStr === 'Timeout') return null;
+      var parts = tsStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+      if (!parts) return null;
+      var month = parseInt(parts[1], 10) - 1;
+      var day = parseInt(parts[2], 10);
+      var year = parseInt(parts[3], 10);
+      var hour = parseInt(parts[4], 10);
+      var minute = parseInt(parts[5], 10);
+      var ampm = parts[6].toUpperCase();
+      if (ampm === 'PM' && hour !== 12) hour += 12;
+      if (ampm === 'AM' && hour === 12) hour = 0;
+      return new Date(year, month, day, hour, minute, 0, 0);
+    }
+
+    function isWithinShift(tsStr, shiftRange) {
+      var ts = parseClockTimestamp(tsStr);
+      if (!ts) return false;
+      var tsEpoch = Math.floor(ts.getTime() / 1000);
+      return tsEpoch >= shiftRange.startTime && tsEpoch <= shiftRange.endTime;
+    }
+
+    function fetchClockStatus(login) {
+      return new Promise(function (resolve) {
+        var now = new Date();
+        var start = new Date(now.getTime() - 24 * 3600 * 1000);
+        var fmt = function (d) {
+          return d.getFullYear() + '/' + pad2(d.getMonth() + 1) + '/' + pad2(d.getDate());
+        };
+        var url = 'https://fclm-portal.amazon.com/employee/timeDetails?employeeId=' +
+          encodeURIComponent(login) +
+          '&warehouseId=' + WAREHOUSE_ID + '&spanType=Intraday' +
+          '&startDateIntraday=' + fmt(start) + '&endDateIntraday=' + fmt(now) +
+          '&startHourIntraday=' + start.getHours() + '&startMinuteIntraday=' + start.getMinutes() +
+          '&endHourIntraday=' + now.getHours() + '&endMinuteIntraday=' + now.getMinutes();
+
+        GM_fetch({
+          method: 'GET', url: url, anonymous: false, timeout: 10000,
+          onload: function (res) { resolve(extractLastEvent(res.responseText)); },
+          onerror: function () { resolve({ status: 'Unknown', ts: 'Error' }); },
+          ontimeout: function () { resolve({ status: 'Unknown', ts: 'Timeout' }); }
+        });
+      });
+    }
+
+    function filterByClockStatus(employees, shiftRange, onProgress) {
+      return new Promise(function (resolve) {
+        if (!employees.length) { resolve([]); return; }
+        var valid = [];
+        var checked = 0;
+        var total = employees.length;
+
+        function processBatch(startIdx) {
+          var batch = employees.slice(startIdx, startIdx + CLOCK_BATCH_SIZE);
+          if (batch.length === 0) { resolve(valid); return; }
+
+          var promises = [];
+          for (var i = 0; i < batch.length; i++) {
+            (function (emp) {
+              promises.push(
+                fetchClockStatus(emp.login).then(function (result) {
+                  checked++;
+                  if (onProgress) onProgress(checked, total);
+                  emp.clockStatus = result.status;
+                  emp.clockTime = result.ts;
+                  if (isWithinShift(result.ts, shiftRange)) {
+                    valid.push(emp);
+                  }
+                })
+              );
+            })(batch[i]);
+          }
+
+          Promise.all(promises).then(function () {
+            if (startIdx + CLOCK_BATCH_SIZE >= employees.length) {
+              resolve(valid);
+            } else {
+              setTimeout(function () {
+                processBatch(startIdx + CLOCK_BATCH_SIZE);
+              }, CLOCK_BATCH_DELAY);
+            }
+          });
+        }
+
+        processBatch(0);
+      });
+    }
+
+    // -- GraphQL --
 
     var QUERY = 'fragment ReportParts on Report { totalsReports { warehouseId defectType defectTypeAltName processPath subProcessAltName defectCount opportunities metricValue threshold metricType __typename } rawReports { processPath processLevelReport { aggregationField managerId subProcess subProcessAltName defectMap { k v __typename } totalDefects metricValue __typename } __typename } totalsReportsErrorMessage rawReportsErrorMessage __typename } query ($warehouseId: String!, $department: String!, $subprocess: String, $timeRanges: [TimeRange!]!) { getReportingByWarehouseId(warehouseId: $warehouseId, department: $department, subprocess: $subprocess, timeRanges: $timeRanges) { ...ReportParts __typename } }';
 
@@ -453,17 +572,22 @@
       badgeStatus = 'flagged'; updateBadge();
 
       if (!result.employees.length) {
-        html += '<div class="aqm-status-card aqm-warn"><div class="aqm-status-icon">' + ICO.warn + '</div><div class="aqm-status-title">Threshold Exceeded</div><div class="aqm-status-msg">No employees found with non-zero defect counts</div></div>';
+        html += '<div class="aqm-status-card aqm-warn"><div class="aqm-status-icon">' + ICO.warn + '</div><div class="aqm-status-title">Threshold Exceeded</div><div class="aqm-status-msg">No employees matched current shift window</div></div>';
         content.innerHTML = html; return;
       }
 
-      html += '<div class="aqm-emp-header">' + ICO.people + ' ' + result.employees.length + ' employee' + (result.employees.length > 1 ? 's' : '') + ' with defects</div>';
-      html += '<div class="aqm-table-wrap"><table class="aqm-table"><thead><tr><th>#</th><th>Login</th><th>Manager</th><th>Recv Err</th><th>Dcnt Err</th></tr></thead><tbody>';
+      html += '<div class="aqm-emp-header">' + ICO.people + ' ' + result.employees.length + ' employee' + (result.employees.length > 1 ? 's' : '') + ' with defects (shift-verified)</div>';
+      if (result.filteredOut > 0) {
+        html += '<div class="aqm-filter-note">' + ICO.clock + ' ' + result.filteredOut + ' employee' + (result.filteredOut > 1 ? 's' : '') + ' filtered out (outside shift window)</div>';
+      }
+      html += '<div class="aqm-table-wrap"><table class="aqm-table"><thead><tr><th>#</th><th>Login</th><th>Manager</th><th>Recv Err</th><th>Dcnt Err</th><th>Clock</th></tr></thead><tbody>';
       for (var i = 0; i < result.employees.length; i++) {
         var e = result.employees[i];
+        var clockCls = e.clockStatus === 'Clocked In' ? ' aqm-val-good' : '';
         html += '<tr><td class="aqm-num">' + (i + 1) + '</td><td><strong>' + esc(e.login) + '</strong></td><td>' + esc(e.manager) + '</td>' +
           '<td class="aqm-num' + (e.receiveErrors > 0 ? ' aqm-val-bad' : '') + '">' + e.receiveErrors + '</td>' +
-          '<td class="aqm-num' + (e.decantErrors > 0 ? ' aqm-val-bad' : '') + '">' + e.decantErrors + '</td></tr>';
+          '<td class="aqm-num' + (e.decantErrors > 0 ? ' aqm-val-bad' : '') + '">' + e.decantErrors + '</td>' +
+          '<td class="aqm-clock-cell' + clockCls + '"><div class="aqm-clock-status">' + esc(e.clockStatus || '-') + '</div><div class="aqm-clock-time">' + esc(e.clockTime || '-') + '</div></td></tr>';
       }
       html += '</tbody></table></div>';
       content.innerHTML = html;
@@ -472,6 +596,20 @@
     function renderFooter(elapsed) {
       var el = document.getElementById('aqm-footer');
       if (el) el.textContent = 'Updated: ' + new Date().toLocaleTimeString() + ' -- ' + elapsed + 'ms -- Auto-refreshes every ' + AUTO_REFRESH_MIN + ' min';
+    }
+
+    function showVerifyingUI(content, indicators) {
+      var ri = indicators['Receive Error Indicator'];
+      var di = indicators['Decant Error Indicator'];
+      var html = '<div class="aqm-indicator-boxes">' +
+        '<div class="aqm-indicator-box ' + (ri && ri.over ? 'aqm-over' : 'aqm-under') + '"><div class="aqm-indicator-label">Receive Error Indicator</div><div class="aqm-indicator-status">' + (ri && ri.over ? ICO.siren + ' OVER' : ICO.check + ' UNDER') + '</div><div class="aqm-indicator-threshold">Threshold: ' + numFmt(THRESHOLD) + '</div></div>' +
+        '<div class="aqm-indicator-box ' + (di && di.over ? 'aqm-over' : 'aqm-under') + '"><div class="aqm-indicator-label">Decant Error Indicator</div><div class="aqm-indicator-status">' + (di && di.over ? ICO.siren + ' OVER' : ICO.check + ' UNDER') + '</div><div class="aqm-indicator-threshold">Threshold: ' + numFmt(THRESHOLD) + '</div></div></div>';
+      html += '<div class="aqm-verify-progress" id="aqm-verify-progress">' +
+        '<div class="aqm-spinner"></div>' +
+        '<div class="aqm-verify-text">' + ICO.clock + ' Verifying shift clock-in status...</div>' +
+        '<div class="aqm-verify-bar-wrap"><div class="aqm-verify-bar" id="aqm-verify-bar" style="width:0%"></div></div>' +
+        '<div class="aqm-verify-count" id="aqm-verify-count">0 / 0</div></div>';
+      content.innerHTML = html;
     }
 
     function runFetch(isAuto) {
@@ -490,19 +628,56 @@
       function doFetch() {
         content.innerHTML = '<div class="aqm-loading"><div class="aqm-spinner"></div><div>Fetching Receive data...</div></div>';
         var startMs = Date.now();
+
         fetchAtlas(tr).then(function (parsed) {
-          isFetching = false;
-          var elapsed = Date.now() - startMs;
-          renderResults(processData(parsed));
-          renderFooter(elapsed);
-          if (isAuto) showToast(ICO.refresh + ' Auto-refreshed');
+          var result = processData(parsed);
+
+          if (result.status !== 'flagged' || result.employees.length === 0) {
+            isFetching = false;
+            renderResults(result);
+            renderFooter(Date.now() - startMs);
+            if (isAuto) showToast(ICO.refresh + ' Auto-refreshed');
+            return;
+          }
+
+          // Clock filter layer
+          var unfilteredCount = result.employees.length;
+          showVerifyingUI(content, result.indicators);
+
+          filterByClockStatus(result.employees, tr, function (checked, total) {
+            var bar = document.getElementById('aqm-verify-bar');
+            var count = document.getElementById('aqm-verify-count');
+            if (bar) bar.style.width = Math.round((checked / total) * 100) + '%';
+            if (count) count.textContent = checked + ' / ' + total;
+          }).then(function (filtered) {
+            isFetching = false;
+            result.employees = filtered;
+            result.filteredOut = unfilteredCount - filtered.length;
+            renderResults(result);
+            renderFooter(Date.now() - startMs);
+            if (isAuto) showToast(ICO.refresh + ' Auto-refreshed');
+            console.log('[RECEIVE FLOAT] Clock filter: ' + unfilteredCount + ' → ' + filtered.length + ' (' + result.filteredOut + ' removed)');
+          });
+
         }).catch(function (err) {
           if (isAuto) {
             silentPreAuth().then(function () { return fetchAtlas(tr); }).then(function (parsed) {
               isFetching = false;
-              renderResults(processData(parsed));
-              renderFooter(Date.now() - startMs);
-              showToast(ICO.refresh + ' Re-authenticated');
+              var result = processData(parsed);
+              if (result.status === 'flagged' && result.employees.length > 0) {
+                var uc = result.employees.length;
+                filterByClockStatus(result.employees, tr, null).then(function (filtered) {
+                  result.employees = filtered;
+                  result.filteredOut = uc - filtered.length;
+                  renderResults(result);
+                  renderFooter(Date.now() - startMs);
+                  showToast(ICO.refresh + ' Re-authenticated');
+                });
+              } else {
+                renderResults(result);
+                renderFooter(Date.now() - startMs);
+                showToast(ICO.refresh + ' Re-authenticated');
+              }
             }).catch(function () {
               isFetching = false; badgeStatus = 'error'; updateBadge();
               content.innerHTML = '<div class="aqm-status-card aqm-error"><div class="aqm-status-icon">' + ICO.cross + '</div><div class="aqm-status-title">Fetch Failed</div><div class="aqm-status-msg">Session expired. Try refreshing.</div></div>';
